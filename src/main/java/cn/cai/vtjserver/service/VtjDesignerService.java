@@ -53,6 +53,8 @@ public class VtjDesignerService {
         request.setQuery(query);
         return switch (type) {
             case "getExtension" -> ApiResponse.ok(getExtension());
+            case "getProjects" -> ApiResponse.ok(getProjects());
+            case "removeProject" -> ApiResponse.ok(removeProject(String.valueOf(request.getData())));
             case "init" -> ApiResponse.ok(init(Jsons.map(request.getData())));
             case "saveProject" -> ApiResponse.ok(saveProject(Jsons.map(request.getData())));
             case "saveFile" -> ApiResponse.ok(saveFile(Jsons.map(request.getData())));
@@ -65,7 +67,8 @@ public class VtjDesignerService {
             case "saveHistoryItem" -> ApiResponse.ok(saveHistoryItem(Jsons.map(request.getData())));
             case "removeHistoryItem" -> ApiResponse.ok(removeHistoryItems(Jsons.map(request.getData())));
             case "saveMaterials" -> ApiResponse.ok(saveMaterials(Jsons.map(request.getData())));
-            case "publish", "publishFile", "createRawPage", "removeRawPage" -> ApiResponse.ok(true);
+            case "publish" -> ApiResponse.ok(publish(String.valueOf(request.getData())));
+            case "publishFile", "createRawPage", "removeRawPage" -> ApiResponse.ok(true);
             case "genVueContent" -> ApiResponse.ok(genVueContent(Jsons.map(request.getData())));
             case "parseVue" -> ApiResponse.ok(parseVue(Jsons.map(request.getData())));
             case "getStaticFiles" -> ApiResponse.ok(getStaticFiles(String.valueOf(request.getData())));
@@ -73,6 +76,48 @@ public class VtjDesignerService {
             case "clearStaticFiles" -> ApiResponse.ok(clearStaticFiles(String.valueOf(request.getData())));
             default -> ApiResponse.fail("No handler for type: " + type, null);
         };
+    }
+
+    public boolean publish(String projectId) {
+        if (projectId == null || projectId.isBlank()) return false;
+        List<FileEntity> files = fileMapper.selectList(new LambdaQueryWrapper<FileEntity>()
+                .eq(FileEntity::getProjectId, projectId));
+        
+        Path publishDir = Path.of(properties.getStorage().getRoot(), "publish", projectId).toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(publishDir);
+            for (FileEntity file : files) {
+                String content = genVueContent(Map.of("dsl", file.getDsl()));
+                Files.writeString(publishDir.resolve(file.getName() + ".vue"), content);
+            }
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    public List<Map<String, Object>> getProjects() {
+        return projectMapper.selectList(null).stream().map(p -> {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("id", p.getId());
+            map.put("name", p.getName());
+            map.put("description", p.getDescription());
+            map.put("platform", p.getPlatform());
+            map.put("updatedAt", p.getUpdatedAt());
+            return map;
+        }).toList();
+    }
+
+    @Transactional
+    public boolean removeProject(String id) {
+        if (id == null || id.isBlank()) return false;
+        projectMapper.deleteById(id);
+        fileMapper.delete(new LambdaQueryWrapper<FileEntity>().eq(FileEntity::getProjectId, id));
+        historyMapper.delete(new LambdaQueryWrapper<HistoryEntity>().eq(HistoryEntity::getProjectId, id));
+        materialMapper.deleteById(id);
+        staticFileMapper.delete(new LambdaQueryWrapper<StaticFileEntity>().eq(StaticFileEntity::getProjectId, id));
+        cacheService.delete(PROJECT_CACHE_PREFIX + id);
+        return true;
     }
 
     public Map<String, Object> getExtension() {
@@ -111,6 +156,7 @@ public class VtjDesignerService {
         String fileId = shortId();
         Map<String, Object> pageFile = launchPageFile(fileId);
         Map<String, Object> pageDsl = launchPageDsl(fileId);
+        pageDsl.put("projectId", id);
         Map<String, Object> project = new LinkedHashMap<>();
         project.put("id", id);
         project.put("name", Jsons.text(input, "name", properties.getProject().getDefaultName()));
