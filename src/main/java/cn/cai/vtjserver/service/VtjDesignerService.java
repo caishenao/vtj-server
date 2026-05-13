@@ -15,6 +15,7 @@ import cn.cai.vtjserver.mapper.HistoryMapper;
 import cn.cai.vtjserver.mapper.MaterialMapper;
 import cn.cai.vtjserver.mapper.ProjectMapper;
 import cn.cai.vtjserver.mapper.StaticFileMapper;
+import cn.cai.vtjserver.mapper.TemplateMapper;
 import cn.cai.vtjserver.util.Jsons;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
@@ -44,6 +45,7 @@ public class VtjDesignerService {
     private final HistoryItemMapper historyItemMapper;
     private final MaterialMapper materialMapper;
     private final StaticFileMapper staticFileMapper;
+    private final TemplateMapper templateMapper;
     private final RedisCacheService cacheService;
     private final VtjProperties properties;
 
@@ -74,6 +76,8 @@ public class VtjDesignerService {
             case "getStaticFiles" -> ApiResponse.ok(getStaticFiles(String.valueOf(request.getData())));
             case "removeStaticFile" -> ApiResponse.ok(removeStaticFile(Jsons.map(request.getData())));
             case "clearStaticFiles" -> ApiResponse.ok(clearStaticFiles(String.valueOf(request.getData())));
+            case "getRoutes" -> ApiResponse.ok(getRoutes(String.valueOf(request.getData())));
+            case "getTemplates" -> ApiResponse.ok(getTemplates());
             default -> ApiResponse.fail("No handler for type: " + type, null);
         };
     }
@@ -103,9 +107,48 @@ public class VtjDesignerService {
             map.put("name", p.getName());
             map.put("description", p.getDescription());
             map.put("platform", p.getPlatform());
+            map.put("createdAt", p.getCreatedAt());
             map.put("updatedAt", p.getUpdatedAt());
             return map;
         }).toList();
+    }
+
+    public Map<String, Object> searchProjects(String keyword, Integer page, Integer size) {
+        LambdaQueryWrapper<ProjectEntity> wrapper = new LambdaQueryWrapper<>();
+        if (keyword != null && !keyword.isBlank()) {
+            wrapper.and(w -> w
+                    .like(ProjectEntity::getName, keyword)
+                    .or()
+                    .like(ProjectEntity::getId, keyword)
+                    .or()
+                    .like(ProjectEntity::getDescription, keyword));
+        }
+        wrapper.orderByDesc(ProjectEntity::getUpdatedAt);
+
+        int p = page == null || page < 1 ? 1 : page;
+        int s = size == null || size < 1 ? 20 : size;
+
+        long total = projectMapper.selectCount(wrapper);
+
+        List<Map<String, Object>> items = projectMapper.selectList(wrapper.last("LIMIT " + s + " OFFSET " + (p - 1) * s))
+                .stream().map(proj -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", proj.getId());
+                    map.put("name", proj.getName());
+                    map.put("description", proj.getDescription());
+                    map.put("platform", proj.getPlatform());
+                    map.put("createdAt", proj.getCreatedAt());
+                    map.put("updatedAt", proj.getUpdatedAt());
+                    return map;
+                }).toList();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("items", items);
+        result.put("total", total);
+        result.put("page", p);
+        result.put("size", s);
+        result.put("pages", (total + s - 1) / s);
+        return result;
     }
 
     @Transactional
@@ -217,7 +260,7 @@ public class VtjDesignerService {
         }
         HistoryEntity entity = new HistoryEntity();
         entity.setId(id);
-        entity.setProjectId(properties.getProject().getDefaultId());
+        entity.setProjectId(Jsons.text(history, "projectId", properties.getProject().getDefaultId()));
         entity.setHistory(history);
         entity.setUpdatedAt(OffsetDateTime.now());
         if (historyMapper.selectById(id) == null) {
@@ -287,19 +330,121 @@ public class VtjDesignerService {
         Map<String, Object> dsl = Jsons.map(data.get("dsl"));
         String name = Jsons.text(dsl, "name", "VtjPage");
         String css = Jsons.text(dsl, "css", "");
+        List<Map<String, Object>> nodes = (List<Map<String, Object>>) dsl.getOrDefault("nodes", List.of());
+        String templateContent = genNodesTemplate(nodes, 2);
+        String scriptContent = genNodesScript(nodes, dsl);
         return """
                 <template>
-                  <div class="vtj-generated-page">%s</div>
+                  <div class="vtj-generated-page">
+                %s
+                  </div>
                 </template>
 
                 <script setup>
-                // Generated fallback source. Full VTJ code generation can be plugged in here.
+                %s
                 </script>
 
                 <style scoped>
                 %s
                 </style>
-                """.formatted(name, css);
+                """.formatted(templateContent, scriptContent, css);
+    }
+
+    private String genNodesTemplate(List<Map<String, Object>> nodes, int indent) {
+        if (nodes == null || nodes.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        String pad = " ".repeat(indent * 2);
+        for (Map<String, Object> node : nodes) {
+            String name = Jsons.text(node, "name", "div");
+            Map<String, Object> props = Jsons.map(node.get("props"));
+            Map<String, Object> events = Jsons.map(node.get("events"));
+            String directives = buildDirectives(node);
+            String attrs = buildAttrs(props, events);
+            sb.append(pad).append("<").append(name);
+            if (attrs.length() > 0) sb.append(" ").append(attrs);
+            if (directives.length() > 0) sb.append(" ").append(directives);
+            String children = (String) node.get("children");
+            List<Map<String, Object>> childNodes = (List<Map<String, Object>>) node.get("nodes");
+            if (childNodes != null && !childNodes.isEmpty()) {
+                sb.append(">\n");
+                sb.append(genNodesTemplate(childNodes, indent + 1));
+                sb.append("\n").append(pad).append("</").append(name).append(">");
+            } else if (children != null && !children.isEmpty()) {
+                sb.append(">").append(children).append("</").append(name).append(">");
+            } else {
+                sb.append(" />");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
+    private String buildAttrs(Map<String, Object> props, Map<String, Object> events) {
+        StringBuilder sb = new StringBuilder();
+        if (props != null) {
+            for (Map.Entry<String, Object> e : props.entrySet()) {
+                String key = e.getKey();
+                Object val = e.getValue();
+                if (val == null) continue;
+                if (key.equals("class")) {
+                    sb.append("class=\"").append(val).append("\" ");
+                } else if (key.equals("style")) {
+                    sb.append("style=\"").append(val).append("\" ");
+                } else if (key.equals("vModel") || key.equals("modelValue")) {
+                    sb.append("v-model=\"").append(val).append("\" ");
+                } else if (key.equals("vBind") || key.equals("v-for")) {
+                    // skip special directives
+                } else {
+                    sb.append(key).append("=\"").append(val).append("\" ");
+                }
+            }
+        }
+        if (events != null) {
+            for (Map.Entry<String, Object> e : events.entrySet()) {
+                String handler = (String) e.getValue();
+                if (handler != null && !handler.isBlank()) {
+                    sb.append("@").append(e.getKey()).append("=\"").append(handler).append("\" ");
+                }
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    private String buildDirectives(Map<String, Object> node) {
+        List<String> directives = new ArrayList<>();
+        List<Map<String, Object>> dirs = (List<Map<String, Object>>) node.get("directives");
+        if (dirs != null) {
+            for (Map<String, Object> d : dirs) {
+                String name = Jsons.text(d, "name", "");
+                String value = Jsons.text(d, "value", "");
+                String arg = Jsons.text(d, "arg", "");
+                if (!name.isBlank()) {
+                    String dir = arg.isEmpty() ? name : name + ":" + arg;
+                    directives.add("v-" + dir + "=\"" + value + "\"");
+                }
+            }
+        }
+        return String.join(" ", directives);
+    }
+
+    private String genNodesScript(List<Map<String, Object>> nodes, Map<String, Object> dsl) {
+        StringBuilder sb = new StringBuilder();
+        // Reactive state
+        Map<String, Object> state = Jsons.map(dsl.get("state"));
+        if (!state.isEmpty()) {
+            sb.append("import { reactive } from 'vue'\n");
+            sb.append("const state = reactive(").append(Jsons.stringify(state)).append(")\n\n");
+        }
+        // Methods
+        Map<String, Object> methods = Jsons.map(dsl.get("methods"));
+        if (!methods.isEmpty()) {
+            for (Map.Entry<String, Object> e : methods.entrySet()) {
+                sb.append("const ").append(e.getKey()).append(" = () => {\n");
+                sb.append("  // ").append(e.getValue()).append("\n");
+                sb.append("}\n\n");
+            }
+        }
+        return sb.toString();
     }
 
     public Map<String, Object> parseVue(Map<String, Object> data) {
@@ -309,6 +454,44 @@ public class VtjDesignerService {
                 "__VTJ_BLOCK__", true,
                 "nodes", List.of()
         );
+    }
+
+    public List<Map<String, Object>> getRoutes(String projectId) {
+        String pid = projectId == null || projectId.isBlank()
+                ? properties.getProject().getDefaultId() : projectId;
+        List<FileEntity> files = fileMapper.selectList(
+                new LambdaQueryWrapper<FileEntity>().eq(FileEntity::getProjectId, pid));
+        ProjectEntity project = projectMapper.selectById(pid);
+        return files.stream().map(f -> {
+            Map<String, Object> route = new LinkedHashMap<>();
+            route.put("path", "/" + f.getName());
+            route.put("name", f.getName());
+            route.put("component", f.getId());
+            route.put("meta", Map.of(
+                    "title", f.getName(),
+                    "projectId", pid,
+                    "platform", project != null ? project.getPlatform() : "web"
+            ));
+            route.put("dsl", f.getDsl());
+            return route;
+        }).toList();
+    }
+
+    public List<Map<String, Object>> getTemplates() {
+        return templateMapper.selectList(new LambdaQueryWrapper<>())
+                .stream().map(t -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", t.getId());
+                    map.put("title", t.getTitle());
+                    map.put("category", t.getCategory());
+                    map.put("platform", t.getPlatform());
+                    map.put("description", t.getDescription());
+                    map.put("cover", t.getCover());
+                    map.put("dsl", t.getDsl());
+                    map.put("creator", t.getCreator());
+                    map.put("createdAt", t.getCreatedAt());
+                    return map;
+                }).toList();
     }
 
     public List<Map<String, Object>> saveUploadedFiles(MultipartFile[] files, String projectId) throws IOException {

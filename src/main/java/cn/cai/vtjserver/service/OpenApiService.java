@@ -79,7 +79,25 @@ public class OpenApiService {
             return ApiResponse.ok(List.of(
                     Map.of("label", "Page", "value", "page"),
                     Map.of("label", "Block", "value", "block"),
-                    Map.of("label", "Form", "value", "form")
+                    Map.of("label", "Form", "value", "form"),
+                    Map.of("label", "Modal", "value", "modal"),
+                    Map.of("label", "List", "value", "list"),
+                    Map.of("label", "Chart", "value", "chart")
+            ));
+        }
+        if ("PlatformType".equalsIgnoreCase(code)) {
+            return ApiResponse.ok(List.of(
+                    Map.of("label", "Web (PC)", "value", "web"),
+                    Map.of("label", "H5 (Mobile)", "value", "h5"),
+                    Map.of("label", "UniApp", "value", "uniapp"),
+                    Map.of("label", "WeChat Mini", "value", "weapp")
+            ));
+        }
+        if ("ProjectStatus".equalsIgnoreCase(code)) {
+            return ApiResponse.ok(List.of(
+                    Map.of("label", "Development", "value", "developing"),
+                    Map.of("label", "Published", "value", "published"),
+                    Map.of("label", "Offline", "value", "offline")
             ));
         }
         return ApiResponse.ok(List.of());

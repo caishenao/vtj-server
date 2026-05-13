@@ -55,4 +55,9 @@ public class DesignerController {
                 .header(HttpHeaders.CONTENT_TYPE, contentType == null ? MediaType.APPLICATION_OCTET_STREAM_VALUE : contentType)
                 .body(new FileSystemResource(path));
     }
+
+    @GetMapping("/api/health")
+    public ApiResponse<?> health() {
+        return ApiResponse.ok(Map.of("status", "UP", "timestamp", System.currentTimeMillis()));
+    }
 }

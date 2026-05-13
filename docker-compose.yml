@@ -31,6 +31,30 @@ services:
       timeout: 5s
       retries: 5
 
+  vtj-server:
+    build: .
+    container_name: vtj-server
+    ports:
+      - "9527:9527"
+    environment:
+      VTJ_DB_URL: jdbc:postgresql://postgres:5432/vtj
+      VTJ_DB_USERNAME: postgres
+      VTJ_DB_PASSWORD: postgres
+      VTJ_REDIS_HOST: redis
+      VTJ_REDIS_PORT: 6379
+      VTJ_SQL_INIT: always
+      VTJ_STORAGE_ROOT: /app/data
+      VTJ_STATIC_DIR: /app/data/static
+    volumes:
+      - vtj-server-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   vtj-postgres-data:
   vtj-redis-data:
+  vtj-server-data:

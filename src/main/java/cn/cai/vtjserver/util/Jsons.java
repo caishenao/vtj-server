@@ -44,4 +44,15 @@ public final class Jsons {
         Object value = map == null ? null : map.get(key);
         return value == null || String.valueOf(value).isBlank() ? fallback : String.valueOf(value);
     }
+
+    /**
+     * 将对象序列化为 JSON 字符串（用于内嵌到代码中）
+     */
+    public static String stringify(Object value) {
+        try {
+            return MAPPER.writeValueAsString(value);
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
 }
