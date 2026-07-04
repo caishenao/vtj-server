@@ -16,6 +16,7 @@ import cn.cai.vtjserver.mapper.HistoryMapper;
 import cn.cai.vtjserver.mapper.MaterialMapper;
 import cn.cai.vtjserver.mapper.ProjectMapper;
 import cn.cai.vtjserver.mapper.StaticFileMapper;
+import cn.cai.vtjserver.mapper.TemplateMapper;
 import cn.cai.vtjserver.util.Jsons;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
@@ -76,6 +77,7 @@ public class VtjDesignerService {
     private final HistoryItemMapper historyItemMapper;
     private final MaterialMapper materialMapper;
     private final StaticFileMapper staticFileMapper;
+    private final TemplateMapper templateMapper;
     private final RedisCacheService cacheService;
     private final VtjProperties properties;
 
@@ -118,6 +120,8 @@ public class VtjDesignerService {
             case "getStaticFiles" -> ApiResponse.ok(getStaticFiles(String.valueOf(request.getData())));
             case "removeStaticFile" -> ApiResponse.ok(removeStaticFile(Jsons.map(request.getData())));
             case "clearStaticFiles" -> ApiResponse.ok(clearStaticFiles(String.valueOf(request.getData())));
+            case "getRoutes" -> ApiResponse.ok(getRoutes(String.valueOf(request.getData())));
+            case "getTemplates" -> ApiResponse.ok(getTemplates());
             default -> ApiResponse.fail("No handler for type: " + type, null);
         };
     }
@@ -159,6 +163,7 @@ public class VtjDesignerService {
             map.put("name", p.getName());
             map.put("description", p.getDescription());
             map.put("platform", p.getPlatform());
+            map.put("createdAt", p.getCreatedAt());
             map.put("updatedAt", p.getUpdatedAt());
             return map;
         }).toList();
@@ -321,7 +326,7 @@ public class VtjDesignerService {
         }
         HistoryEntity entity = new HistoryEntity();
         entity.setId(id);
-        entity.setProjectId(properties.getProject().getDefaultId());
+        entity.setProjectId(Jsons.text(history, "projectId", properties.getProject().getDefaultId()));
         entity.setHistory(history);
         entity.setUpdatedAt(OffsetDateTime.now());
         if (historyMapper.selectById(id) == null) {
@@ -438,6 +443,44 @@ public class VtjDesignerService {
         dsl.put("__VERSION__", String.valueOf(System.currentTimeMillis()));
         dsl.put("nodes", nodes);
         return dsl;
+    }
+
+    public List<Map<String, Object>> getRoutes(String projectId) {
+        String pid = projectId == null || projectId.isBlank()
+                ? properties.getProject().getDefaultId() : projectId;
+        List<FileEntity> files = fileMapper.selectList(
+                new LambdaQueryWrapper<FileEntity>().eq(FileEntity::getProjectId, pid));
+        ProjectEntity project = projectMapper.selectById(pid);
+        return files.stream().map(f -> {
+            Map<String, Object> route = new LinkedHashMap<>();
+            route.put("path", "/" + f.getName());
+            route.put("name", f.getName());
+            route.put("component", f.getId());
+            route.put("meta", Map.of(
+                    "title", f.getName(),
+                    "projectId", pid,
+                    "platform", project != null ? project.getPlatform() : "web"
+            ));
+            route.put("dsl", f.getDsl());
+            return route;
+        }).toList();
+    }
+
+    public List<Map<String, Object>> getTemplates() {
+        return templateMapper.selectList(new LambdaQueryWrapper<>())
+                .stream().map(t -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", t.getId());
+                    map.put("title", t.getTitle());
+                    map.put("category", t.getCategory());
+                    map.put("platform", t.getPlatform());
+                    map.put("description", t.getDescription());
+                    map.put("cover", t.getCover());
+                    map.put("dsl", t.getDsl());
+                    map.put("creator", t.getCreator());
+                    map.put("createdAt", t.getCreatedAt());
+                    return map;
+                }).toList();
     }
 
     public List<Map<String, Object>> saveUploadedFiles(MultipartFile[] files, String projectId) throws IOException {
