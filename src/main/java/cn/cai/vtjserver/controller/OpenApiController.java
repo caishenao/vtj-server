@@ -1,6 +1,7 @@
 package cn.cai.vtjserver.controller;
 
 import cn.cai.vtjserver.dto.ApiResponse;
+import cn.cai.vtjserver.module.ai.service.AiAgentService;
 import cn.cai.vtjserver.service.OpenApiService;
 import cn.cai.vtjserver.util.Jsons;
 import lombok.RequiredArgsConstructor;
@@ -15,7 +16,6 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -23,6 +23,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class OpenApiController {
     private final OpenApiService service;
+    private final AiAgentService aiAgentService;
 
     @GetMapping("/api/open/auth/{sign}")
     public ResponseEntity<String> auth(@PathVariable String sign, @RequestParam(required = false) String callback) {
@@ -72,18 +73,25 @@ public class OpenApiController {
         return service.publishTemplate(form, cover);
     }
 
+    @GetMapping("/api/open/report")
+    public ResponseEntity<String> report(@RequestParam(required = false) String callback) {
+        return jsonp(service.report(), callback);
+    }
+
+    @PostMapping("/api/open/report")
+    public ApiResponse<?> postReport(@RequestParam(required = false) Map<String, String> form) {
+        return service.report();
+    }
+
     @PostMapping("/api/open/topic/post/{token}")
     public ApiResponse<?> postTopic(@RequestBody(required = false) Map<String, Object> body) {
-        Map<String, Object> topic = new LinkedHashMap<>(body == null ? Map.of() : body);
-        topic.putIfAbsent("id", java.util.UUID.randomUUID().toString().replace("-", ""));
-        return service.successObject(topic);
+        Map<String, Object> input = new LinkedHashMap<>(body == null ? Map.of() : body);
+        return service.successObject(aiAgentService.createTopicPayload(input));
     }
 
     @PostMapping({"/api/open/topic/image/{token}", "/api/open/topic/json/{token}"})
     public ApiResponse<?> postMultipartTopic(@RequestParam Map<String, Object> form) {
-        Map<String, Object> topic = new LinkedHashMap<>(form);
-        topic.putIfAbsent("id", java.util.UUID.randomUUID().toString().replace("-", ""));
-        return service.successObject(topic);
+        return service.successObject(aiAgentService.createTopicPayload(new LinkedHashMap<>(form)));
     }
 
     @GetMapping({"/api/open/chat/list/{token}", "/api/open/topic/list/{token}", "/api/open/topic/hot"})
@@ -93,9 +101,7 @@ public class OpenApiController {
 
     @PostMapping("/api/open/chat/post/{token}")
     public ApiResponse<?> postChat(@RequestBody(required = false) Map<String, Object> body) {
-        Map<String, Object> chat = new LinkedHashMap<>(body == null ? Map.of() : body);
-        chat.putIfAbsent("id", java.util.UUID.randomUUID().toString().replace("-", ""));
-        return service.successObject(chat);
+        return service.successObject(aiAgentService.createChatPayload(body == null ? Map.of() : body));
     }
 
     @PostMapping("/api/open/chat/save/{token}")
@@ -124,21 +130,18 @@ public class OpenApiController {
     }
 
     @PostMapping("/api/open/skills/{platform}")
-    public ApiResponse<?> skills(@RequestBody(required = false) Object ids) {
-        return ApiResponse.ok("");
+    public ApiResponse<?> skills(@PathVariable String platform, @RequestBody(required = false) Object ids) {
+        return service.skills(platform, ids);
     }
 
+    /**
+     * Streams the AI completion for a topic. {@code tid} is the topic id (used to recover the stored
+     * prompt and routing scene); {@code id} is the message id echoed back in every SSE frame. When no
+     * model is configured this degrades to a single empty terminal frame.
+     */
     @GetMapping(value = "/api/open/completions/{token}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter completions(@RequestParam String tid, @RequestParam String id) throws IOException {
-        SseEmitter emitter = new SseEmitter(5000L);
-        emitter.send(SseEmitter.event().data(Jsons.string(Map.of(
-                "id", id,
-                "topicId", tid,
-                "content", "",
-                "finish", true
-        ))));
-        emitter.complete();
-        return emitter;
+    public SseEmitter completions(@RequestParam String tid, @RequestParam String id) {
+        return aiAgentService.stream(tid, id);
     }
 
     private ResponseEntity<String> jsonp(ApiResponse<?> response, String callback) {

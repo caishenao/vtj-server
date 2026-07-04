@@ -3,12 +3,14 @@ package cn.cai.vtjserver.controller;
 import cn.cai.vtjserver.dto.ApiRequest;
 import cn.cai.vtjserver.dto.ApiResponse;
 import cn.cai.vtjserver.service.VtjDesignerService;
+import jakarta.validation.constraints.NotBlank;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,14 +25,23 @@ import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * Entry point for the VTJ designer's local dispatch protocol. It performs no business logic
+ * (AGENTS.md §3): it only decodes the request and delegates to {@link VtjDesignerService}.
+ */
 @RestController
+@Validated
 @RequiredArgsConstructor
 public class DesignerController {
     private final VtjDesignerService service;
 
+    /**
+     * Single dispatch endpoint for all designer persistence operations. The concrete operation is
+     * selected by the {@code type} path segment (or the body's {@code type}).
+     */
     @PostMapping("/__vtj__/api/{type}.json")
     public ApiResponse<?> dispatch(
-            @PathVariable String type,
+            @PathVariable @NotBlank String type,
             @RequestBody(required = false) ApiRequest request,
             @RequestParam Map<String, Object> query) {
         ApiRequest body = request == null ? new ApiRequest() : request;

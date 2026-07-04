@@ -17,6 +17,10 @@ public class ApiResponse<T> {
     }
 
     public static ApiResponse<Object> fail(String msg, Object data) {
-        return new ApiResponse<>(1, msg, data, null, false);
+        return fail(1, msg, data);
+    }
+
+    public static ApiResponse<Object> fail(int code, String msg, Object data) {
+        return new ApiResponse<>(code, msg, data, null, false);
     }
 }
