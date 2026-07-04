@@ -4,7 +4,7 @@ import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
-@MapperScan("cn.cai.vtjserver.mapper")
+@MapperScan({"cn.cai.vtjserver.mapper", "cn.cai.vtjserver.module.ai.mapper"})
 @SpringBootApplication
 public class VtjServerApplication {
 

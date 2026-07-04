@@ -69,3 +69,30 @@ CREATE TABLE IF NOT EXISTS vtj_templates (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vtj_templates_platform ON vtj_templates(platform);
+
+-- AI 代理网关：大模型配置。api_key 以密文存储（AES-GCM），禁止明文落库。
+-- type 用于场景路由：MULTIMODAL(设计稿/UI) 与 CODING(逻辑/代码) 分别选取各自 enabled 的配置。
+CREATE TABLE IF NOT EXISTS vtj_llm_config (
+    id VARCHAR(128) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    type VARCHAR(32) NOT NULL DEFAULT 'CODING',
+    provider VARCHAR(128),
+    api_key TEXT,
+    base_url VARCHAR(1024) NOT NULL,
+    model VARCHAR(255) NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vtj_llm_config_type ON vtj_llm_config(type, enabled);
+
+-- AI 会话主题：completions 回调仅携带 tid，需据此取回原始 prompt 与场景，故 topic 必须持久化。
+CREATE TABLE IF NOT EXISTS vtj_ai_topic (
+    id VARCHAR(128) PRIMARY KEY,
+    prompt TEXT,
+    scene VARCHAR(32),
+    model VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
