@@ -46,7 +46,25 @@ class OpenApiServiceTest {
         assertThat(response.getData()).asString()
                 .contains("VTJ Agent Output Protocol")
                 .contains("Staged page generation")
-                .contains("one section/component per turn");
+                .contains("one section/component per turn")
+                .contains("createPage")
+                .contains("createBlock")
+                .contains("setApi")
+                .contains("refresh")
+                .contains("auto-apply");
+    }
+
+    @Test
+    void skillsReturnsSelectedComponentDesignRules() {
+        ApiResponse<?> response = service.skills("web", List.of("selected-component"));
+
+        assertThat(response.isSuccess()).isTrue();
+        assertThat(response.getData()).asString()
+                .contains("VTJ Selected Component Design Skill")
+                .contains("vtj-node")
+                .contains("JSExpression")
+                .contains("JSFunction")
+                .contains("禁止修改页面根 DSL");
     }
 
     @Test

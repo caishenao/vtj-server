@@ -186,6 +186,7 @@ public class OpenApiService {
             case "access", "auth", "permission" -> "access";
             case "axios", "http" -> "axios";
             case "globals", "global", "env", "i18n" -> "globals";
+            case "selected", "selection", "selected-component", "component-edit" -> "selected-component";
             case "protocol", "agent", "vtj-agent" -> "vtj-agent";
             default -> value;
         };
@@ -198,6 +199,7 @@ public class OpenApiService {
                 可用技能 ID：
                 - vtj-agent：输出协议、工具调用方式、Agent 执行约束
                 - vtj-dsl：VTJ 页面/节点 DSL 结构、属性、事件、指令、数据源
+                - selected-component：选中组件的局部设计、NodeSchema 输出与安全应用约束
                 - events：组件事件绑定、JSFunction / JSExpression 写法
                 - apis：接口定义、请求配置、组件绑定接口数据
                 - pages：页面、目录、布局、首页和菜单维护
@@ -244,6 +246,37 @@ public class OpenApiService {
                 - events 绑定事件处理器，value 通常是函数体或方法名。
                 - dataSources 用于接口数据源，组件 props 再通过 JSExpression 引用状态。
                 - 复杂页面建议用 `createPage` 创建页面，再用 Vue SFC 或 diff 生成结构。
+                """);
+        docs.put("selected-component", """
+                # VTJ Selected Component Design Skill
+
+                当请求上下文包含 selection 时，selection 是不可变的修改边界。只允许修改其中 nodeId
+                对应的 NodeSchema 子树，禁止修改页面根 DSL、兄弟节点、父节点、全局样式、路由、接口或其他文件。
+
+                输出必须是 `A:` 加一个完整的 `vtj-node` JSON 代码块：
+                ```vtj-node
+                {
+                  "name": "ElButton",
+                  "from": "element-plus",
+                  "props": { "type": "primary" },
+                  "events": {
+                    "click": {
+                      "name": "click",
+                      "handler": { "type": "JSFunction", "value": "function () { this.$message.success('done') }" }
+                    }
+                  },
+                  "directives": [],
+                  "children": "保存"
+                }
+                ```
+
+                约束：
+                - 根节点 name 和 from 必须与 selection.dsl 一致，根 id 由前端保留，不得改组件类型。
+                - 返回完整 NodeSchema；未修改的 props/events/directives/children 也要保留。
+                - 动态属性使用 `{ "type": "JSExpression", "value": "state.value" }`。
+                - 事件处理器使用 `{ "type": "JSFunction", "value": "function (...) { ... }" }`。
+                - children 可以是字符串、JSExpression 或 NodeSchema 数组；子节点必须使用真实物料组件名和来源。
+                - 不得返回整页 `vue`、`diff` 或会修改页面其他区域的工具调用。
                 """);
         docs.put("events", """
                 # VTJ Events Skill
@@ -356,6 +389,7 @@ public class OpenApiService {
                 - Tool call: output `A:` plus one `json` code block.
                 - Full page generation: output `A:` plus one `vue` code block with template/script/style.
                 - Current page update: output `A:` plus one `diff` code block.
+                - Selected component update: output `A:` plus one complete `vtj-node` JSON code block.
                 - Finished: output `F:`.
                 - One response may contain at most one executable `A:` block.
 
@@ -366,6 +400,21 @@ public class OpenApiService {
                 3. Use `diff` against the current Vue source for section updates.
                 4. If one section fails, retry only that section. Do not regenerate the whole page.
                 5. Finish with `F:` after all sections are complete.
+
+                ## Executable workflows
+                - New page: call `createPage`; after the returned `O:` contains its id and the page is
+                  active, output a Vue SFC for that page.
+                - New reusable component: call `createBlock`; after activation, output its Vue SFC.
+                - Existing page/component: call `getCurrentFileContent` when source is missing, then
+                  use one focused `diff` block.
+                - Data behavior: call `setApi` before wiring the API into state, methods, dataSources,
+                  events, loading states, and error handling.
+                - JavaScript behavior: use `defineComponent`, `reactive` state, `methods`, and
+                  `computed` so the generated behavior is preserved in VTJ DSL. Avoid script-setup-only
+                  state for executable pages.
+                - Verification: after the frontend applies generated DSL, call `refresh`; fix only the
+                  reported runtime error, then continue. With auto-apply enabled, each successful stage
+                  is rendered in the designer before the next Agent turn.
                 """);
         return docs;
     }

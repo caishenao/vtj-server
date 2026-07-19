@@ -222,7 +222,89 @@ class AiAgentServiceTest {
         assertThat(prompt)
                 .contains("bind click event")
                 .contains("Current page DSL")
-                .contains("Registered frontend tools JSON")
+                .contains("Registered frontend tool signatures")
                 .contains("\"setApi\"");
+    }
+
+    @Test
+    void composeAgentPromptDeclaresPageComponentApiAndJavascriptCapabilities() {
+        String prompt = service.composeAgentPrompt(Map.of(), "build an interactive admin page");
+
+        assertThat(prompt)
+                .contains("Capability routing")
+                .contains("createPage")
+                .contains("createBlock")
+                .contains("setApi")
+                .contains("setGlobalStore")
+                .contains("JavaScript and application behavior")
+                .contains("refresh");
+    }
+
+    @Test
+    void composeAgentPromptLocksChangesToSelectedComponent() {
+        Map<String, Object> selection = Map.of(
+                "nodeId", "button-1",
+                "name", "ElButton",
+                "path", List.of("div#layout", "ElButton#button-1"),
+                "dsl", Map.of(
+                        "id", "button-1",
+                        "name", "ElButton",
+                        "from", "element-plus",
+                        "props", Map.of("type", "primary"),
+                        "children", "Save"));
+
+        String prompt = service.composeAgentPrompt(Map.of("selection", selection), "make the button green");
+
+        assertThat(prompt)
+                .contains("Immutable selected-component scope")
+                .contains("Selected component scope")
+                .contains("vtj-node")
+                .contains("button-1")
+                .contains("Never return page-level `vue`/`diff`")
+                .contains("JSFunction");
+    }
+
+    @Test
+    void createChatPayloadEchoesSelectionForScopedApplication() {
+        AiTopicEntity existing = topic("t1", "existing prompt", AiScene.CODING);
+        when(topicMapper.selectById("t1")).thenReturn(existing);
+        Map<String, Object> selection = Map.of("nodeId", "button-1", "name", "ElButton");
+
+        Map<String, Object> chat = service.createChatPayload(Map.of(
+                "topicId", "t1",
+                "prompt", "change color",
+                "selection", selection));
+
+        assertThat(chat).containsEntry("selection", selection);
+    }
+
+    @Test
+    void oversizedContextKeepsToolSignaturesAndCurrentSource() {
+        VtjProperties limitedProperties = new VtjProperties();
+        limitedProperties.getAi().setMaxContextChars(6500);
+        service = new AiAgentService(topicMapper, llmConfigService, client, limitedProperties);
+        String longDescription = "tool-description-".repeat(300);
+        String tools = """
+                [
+                  {"name":"createPage","description":"%s","parameters":[{"name":"page","type":"object","required":true}]},
+                  {"name":"createBlock","description":"%s","parameters":[{"name":"block","type":"object","required":true}]},
+                  {"name":"setApi","description":"%s","parameters":[{"name":"api","type":"object","required":true}]}
+                ]
+                """.formatted(longDescription, longDescription, longDescription);
+
+        String prompt = service.composeAgentPrompt(Map.of(
+                "tools", tools,
+                "source", "<template><main>LIVE-PREVIEW-SOURCE</main></template>" + "x".repeat(6000),
+                "dsl", "d".repeat(12000),
+                "project", "p".repeat(12000)),
+                "create a page and wire its API");
+
+        assertThat(prompt)
+                .hasSizeLessThanOrEqualTo(6500)
+                .contains("- createPage(page:object)")
+                .contains("- createBlock(block:object)")
+                .contains("- setApi(api:object)")
+                .contains("LIVE-PREVIEW-SOURCE")
+                .contains("Some context was compacted");
     }
 }

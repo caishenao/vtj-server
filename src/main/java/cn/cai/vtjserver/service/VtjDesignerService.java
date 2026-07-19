@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -56,6 +57,7 @@ import java.util.regex.Pattern;
 public class VtjDesignerService {
     private static final String PROJECT_CACHE_PREFIX = "vtj:project:";
     private static final Pattern TEMPLATE_PATTERN = Pattern.compile("(?is)<template[^>]*>(.*?)</template>");
+    private static final Pattern SCRIPT_PATTERN = Pattern.compile("(?is)<script[^>]*>(.*?)</script>");
     private static final Pattern STYLE_PATTERN = Pattern.compile("(?is)<style[^>]*>(.*?)</style>");
     private static final Pattern TAG_PATTERN = Pattern.compile("(?is)<!--.*?-->|<![^>]*>|<(/?)([A-Za-z][\\w:-]*)([^>]*)>");
     private static final Pattern ATTR_PATTERN = Pattern.compile("([:@#A-Za-z_][\\w:.-]*)(?:\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s\"'=<>`]+)))?");
@@ -167,6 +169,36 @@ public class VtjDesignerService {
             map.put("updatedAt", p.getUpdatedAt());
             return map;
         }).toList();
+    }
+
+    /**
+     * Searches the lightweight project list and applies one-based pagination for the existing
+     * {@code /api/low-code/projects/search} compatibility endpoint.
+     *
+     * @param keyword optional id, name or description fragment
+     * @param page one-based page number
+     * @param size page size
+     * @return pagination metadata and the matching project records
+     */
+    public Map<String, Object> searchProjects(String keyword, Integer page, Integer size) {
+        int currentPage = page == null || page < 1 ? 1 : page;
+        int pageSize = size == null || size < 1 ? 20 : Math.min(size, 200);
+        String query = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+        List<Map<String, Object>> matches = getProjects().stream()
+                .filter(project -> query.isBlank()
+                        || containsIgnoreCase(project.get("id"), query)
+                        || containsIgnoreCase(project.get("name"), query)
+                        || containsIgnoreCase(project.get("description"), query))
+                .toList();
+        int from = Math.min((currentPage - 1) * pageSize, matches.size());
+        int to = Math.min(from + pageSize, matches.size());
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("records", matches.subList(from, to));
+        result.put("total", matches.size());
+        result.put("page", currentPage);
+        result.put("size", pageSize);
+        return result;
     }
 
     /**
@@ -397,6 +429,7 @@ public class VtjDesignerService {
         String name = Jsons.text(dsl, "name", "VtjPage");
         String css = Jsons.text(dsl, "css", "");
         String template = nodesToHtml(dsl.get("nodes"), 2);
+        String script = renderScript(name, dsl);
         if (template.isBlank()) {
             template = "  <div class=\"vtj-generated-page\">" + escapeHtml(name) + "</div>";
         }
@@ -405,13 +438,12 @@ public class VtjDesignerService {
                 %s
                 </template>
 
-                <script setup>
-                </script>
+                %s
 
                 <style scoped>
                 %s
                 </style>
-                """.formatted(template, css);
+                """.formatted(template, script, css);
     }
 
     public Map<String, Object> parseVue(Map<String, Object> data) {
@@ -420,6 +452,7 @@ public class VtjDesignerService {
         String source = Jsons.text(data, "source", "");
         String template = extractTemplate(source);
         List<Map<String, Object>> nodes = htmlToNodes(template);
+        Map<String, Object> scriptDsl = parseScriptDsl(extractScript(source));
         if (nodes.isEmpty()) {
             nodes = List.of(textNode("div", visibleFallbackText(template, name), Map.of("class", "vtj-ai-generated")));
         }
@@ -429,10 +462,10 @@ public class VtjDesignerService {
         dsl.put("name", name);
         dsl.put("locked", false);
         dsl.put("inject", List.of());
-        dsl.put("state", Map.of());
+        dsl.put("state", scriptDsl.getOrDefault("state", Map.of()));
         dsl.put("lifeCycles", Map.of());
-        dsl.put("methods", Map.of());
-        dsl.put("computed", Map.of());
+        dsl.put("methods", scriptDsl.getOrDefault("methods", Map.of()));
+        dsl.put("computed", scriptDsl.getOrDefault("computed", Map.of()));
         dsl.put("watch", List.of());
         dsl.put("css", extractStyles(source));
         dsl.put("props", List.of());
@@ -642,6 +675,298 @@ public class VtjDesignerService {
         return matcher.find() ? matcher.group(1).trim() : source.trim();
     }
 
+    private String extractScript(String source) {
+        if (source == null || source.isBlank()) {
+            return "";
+        }
+        Matcher matcher = SCRIPT_PATTERN.matcher(source);
+        return matcher.find() ? matcher.group(1).trim() : "";
+    }
+
+    private Map<String, Object> parseScriptDsl(String script) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("state", parseState(extractCallObject(script, "reactive")));
+        result.put("methods", parseFunctions(extractNamedObject(script, "methods")));
+        result.put("computed", parseFunctions(extractNamedObject(script, "computed")));
+        return result;
+    }
+
+    private Map<String, Object> parseState(String objectBody) {
+        Map<String, Object> state = new LinkedHashMap<>();
+        for (String entry : splitTopLevel(objectBody)) {
+            int colon = findTopLevel(entry, ':');
+            if (colon <= 0) {
+                continue;
+            }
+            String key = unquote(entry.substring(0, colon).trim());
+            String value = entry.substring(colon + 1).trim();
+            if (!key.isBlank() && !value.isBlank()) {
+                state.put(key, jsExpression(value));
+            }
+        }
+        return state;
+    }
+
+    private Map<String, Object> parseFunctions(String objectBody) {
+        Map<String, Object> functions = new LinkedHashMap<>();
+        for (String entry : splitTopLevel(objectBody)) {
+            String value = entry.trim();
+            if (value.isBlank()) {
+                continue;
+            }
+            Matcher method = Pattern.compile("(?s)^(async\\s+)?([A-Za-z_$][\\w$]*)\\s*\\((.*?)\\)\\s*(\\{.*})$")
+                    .matcher(value);
+            if (method.matches()) {
+                String async = method.group(1) == null ? "" : "async ";
+                functions.put(method.group(2), jsFunction(async + "(" + method.group(3).trim() + ") => "
+                        + method.group(4).trim()));
+                continue;
+            }
+            int colon = findTopLevel(value, ':');
+            if (colon > 0) {
+                String name = unquote(value.substring(0, colon).trim());
+                String expression = value.substring(colon + 1).trim();
+                if (!name.isBlank() && !expression.isBlank()) {
+                    functions.put(name, jsFunction(expression));
+                }
+            }
+        }
+        return functions;
+    }
+
+    private String extractCallObject(String source, String callName) {
+        if (source == null || source.isBlank()) {
+            return "";
+        }
+        Matcher matcher = Pattern.compile("\\b" + Pattern.quote(callName) + "\\s*\\(").matcher(source);
+        if (!matcher.find()) {
+            return "";
+        }
+        int open = source.indexOf('{', matcher.end());
+        return balancedBody(source, open, '{', '}');
+    }
+
+    private String extractNamedObject(String source, String propertyName) {
+        if (source == null || source.isBlank()) {
+            return "";
+        }
+        Matcher matcher = Pattern.compile("\\b" + Pattern.quote(propertyName) + "\\s*:").matcher(source);
+        if (!matcher.find()) {
+            return "";
+        }
+        int open = source.indexOf('{', matcher.end());
+        return balancedBody(source, open, '{', '}');
+    }
+
+    private String balancedBody(String source, int openIndex, char open, char close) {
+        if (source == null || openIndex < 0 || openIndex >= source.length() || source.charAt(openIndex) != open) {
+            return "";
+        }
+        int depth = 0;
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = openIndex; i < source.length(); i++) {
+            char current = source.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"' || current == '`') {
+                quote = current;
+            } else if (current == open) {
+                depth++;
+            } else if (current == close && --depth == 0) {
+                return source.substring(openIndex + 1, i).trim();
+            }
+        }
+        return "";
+    }
+
+    private List<String> splitTopLevel(String value) {
+        List<String> entries = new ArrayList<>();
+        if (value == null || value.isBlank()) {
+            return entries;
+        }
+        int start = 0;
+        int round = 0;
+        int square = 0;
+        int curly = 0;
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < value.length(); i++) {
+            char current = value.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"' || current == '`') {
+                quote = current;
+                continue;
+            }
+            switch (current) {
+                case '(' -> round++;
+                case ')' -> round--;
+                case '[' -> square++;
+                case ']' -> square--;
+                case '{' -> curly++;
+                case '}' -> curly--;
+                case ',' -> {
+                    if (round == 0 && square == 0 && curly == 0) {
+                        entries.add(value.substring(start, i).trim());
+                        start = i + 1;
+                    }
+                }
+                default -> {
+                }
+            }
+        }
+        entries.add(value.substring(start).trim());
+        return entries;
+    }
+
+    private int findTopLevel(String value, char target) {
+        int round = 0;
+        int square = 0;
+        int curly = 0;
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < value.length(); i++) {
+            char current = value.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"' || current == '`') {
+                quote = current;
+                continue;
+            }
+            if (current == target && round == 0 && square == 0 && curly == 0) {
+                return i;
+            }
+            switch (current) {
+                case '(' -> round++;
+                case ')' -> round--;
+                case '[' -> square++;
+                case ']' -> square--;
+                case '{' -> curly++;
+                case '}' -> curly--;
+                default -> {
+                }
+            }
+        }
+        return -1;
+    }
+
+    private String unquote(String value) {
+        if (value == null || value.length() < 2) {
+            return value == null ? "" : value;
+        }
+        char first = value.charAt(0);
+        char last = value.charAt(value.length() - 1);
+        return (first == last && (first == '\'' || first == '"'))
+                ? value.substring(1, value.length() - 1) : value;
+    }
+
+    private String renderScript(String name, Map<String, Object> dsl) {
+        Map<String, Object> state = asMap(dsl.get("state"));
+        Map<String, Object> methods = asMap(dsl.get("methods"));
+        Map<String, Object> computed = asMap(dsl.get("computed"));
+        if (state.isEmpty() && methods.isEmpty() && computed.isEmpty()) {
+            return "<script setup>\n</script>";
+        }
+
+        StringBuilder script = new StringBuilder();
+        script.append("<script>\n")
+                .append("import { defineComponent, reactive } from 'vue';\n\n")
+                .append("export default defineComponent({\n")
+                .append("  name: '").append(escapeJsString(name)).append("',\n");
+        if (!state.isEmpty()) {
+            script.append("  setup() {\n")
+                    .append("    const state = reactive({\n");
+            state.forEach((key, value) -> script.append("      ")
+                    .append(jsPropertyName(key)).append(": ").append(jsCode(value)).append(",\n"));
+            script.append("    });\n")
+                    .append("    return { state };\n")
+                    .append("  },\n");
+        }
+        appendFunctionObject(script, "computed", computed);
+        appendFunctionObject(script, "methods", methods);
+        script.append("});\n</script>");
+        return script.toString();
+    }
+
+    private void appendFunctionObject(StringBuilder script, String section, Map<String, Object> functions) {
+        if (functions.isEmpty()) {
+            return;
+        }
+        script.append("  ").append(section).append(": {\n");
+        functions.forEach((name, function) -> script.append("    ")
+                .append(toObjectMethod(name, jsCode(function))).append(",\n"));
+        script.append("  },\n");
+    }
+
+    private String toObjectMethod(String name, String function) {
+        String property = jsPropertyName(name);
+        Matcher arrow = Pattern.compile("(?s)^(async\\s+)?\\((.*?)\\)\\s*=>\\s*\\{(.*)}\\s*$")
+                .matcher(function.trim());
+        if (arrow.matches()) {
+            String async = arrow.group(1) == null ? "" : "async ";
+            return async + property + "(" + arrow.group(2).trim() + ") {" + arrow.group(3) + "}";
+        }
+        Matcher singleArgArrow = Pattern.compile("(?s)^(async\\s+)?([A-Za-z_$][\\w$]*)\\s*=>\\s*\\{(.*)}\\s*$")
+                .matcher(function.trim());
+        if (singleArgArrow.matches()) {
+            String async = singleArgArrow.group(1) == null ? "" : "async ";
+            return async + property + "(" + singleArgArrow.group(2) + ") {" + singleArgArrow.group(3) + "}";
+        }
+        Matcher classic = Pattern.compile("(?s)^function\\s*\\((.*?)\\)\\s*\\{(.*)}\\s*$")
+                .matcher(function.trim());
+        if (classic.matches()) {
+            return property + "(" + classic.group(1).trim() + ") {" + classic.group(2) + "}";
+        }
+        return property + ": " + function;
+    }
+
+    private String jsCode(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Object code = map.get("value");
+            if (code != null) {
+                return String.valueOf(code);
+            }
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return String.valueOf(value);
+        }
+        return value == null ? "null" : Jsons.string(value);
+    }
+
+    private String jsPropertyName(String name) {
+        return name != null && name.matches("[A-Za-z_$][\\w$]*")
+                ? name : "'" + escapeJsString(name == null ? "" : name) + "'";
+    }
+
+    private String escapeJsString(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("'", "\\'");
+    }
+
     private String extractStyles(String source) {
         if (source == null || source.isBlank()) {
             return "";
@@ -696,7 +1021,8 @@ public class VtjDesignerService {
         }
         String text = decodeEntities(raw).replaceAll("\\s+", " ").trim();
         if (!text.isBlank() && !"\"".equals(text)) {
-            parent.children.add(text);
+            Matcher expression = Pattern.compile("^\\{\\{\\s*(.*?)\\s*}}$", Pattern.DOTALL).matcher(text);
+            parent.children.add(expression.matches() ? jsExpression(expression.group(1)) : text);
         }
     }
 
@@ -837,8 +1163,11 @@ public class VtjDesignerService {
         if (children.isEmpty()) {
             return "";
         }
-        if (children.size() == 1 && children.get(0) instanceof String text) {
-            return text;
+        if (children.size() == 1) {
+            Object child = children.get(0);
+            if (child instanceof String || child instanceof Map<?, ?>) {
+                return child;
+            }
         }
         return childrenToNodeList(children);
     }
@@ -1052,6 +1381,10 @@ public class VtjDesignerService {
             }
         }
         return "";
+    }
+
+    private boolean containsIgnoreCase(Object value, String query) {
+        return value != null && String.valueOf(value).toLowerCase(Locale.ROOT).contains(query);
     }
 
     private String decodeEntities(String value) {

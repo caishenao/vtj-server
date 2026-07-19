@@ -12,6 +12,7 @@ import cn.cai.vtjserver.mapper.HistoryMapper;
 import cn.cai.vtjserver.mapper.MaterialMapper;
 import cn.cai.vtjserver.mapper.ProjectMapper;
 import cn.cai.vtjserver.mapper.StaticFileMapper;
+import cn.cai.vtjserver.mapper.TemplateMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -53,6 +54,8 @@ class VtjDesignerServiceTest {
     @Mock
     private StaticFileMapper staticFileMapper;
     @Mock
+    private TemplateMapper templateMapper;
+    @Mock
     private RedisCacheService cacheService;
 
     private VtjProperties properties;
@@ -62,7 +65,7 @@ class VtjDesignerServiceTest {
     void setUp() {
         properties = new VtjProperties();
         service = new VtjDesignerService(projectMapper, fileMapper, historyMapper, historyItemMapper,
-                materialMapper, staticFileMapper, cacheService, properties);
+                materialMapper, staticFileMapper, templateMapper, cacheService, properties);
     }
 
     @Test
@@ -106,6 +109,27 @@ class VtjDesignerServiceTest {
 
         assertThat(service.getFile("f1")).containsEntry("name", "HomePage");
         assertThat(service.getFile("missing")).isNull();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void searchProjectsFiltersAndPaginatesExistingCompatibilityEndpoint() {
+        ProjectEntity dashboard = new ProjectEntity();
+        dashboard.setId("p1");
+        dashboard.setName("Operations Dashboard");
+        dashboard.setDescription("Realtime metrics");
+        ProjectEntity website = new ProjectEntity();
+        website.setId("p2");
+        website.setName("Company Website");
+        website.setDescription("Public pages");
+        when(projectMapper.selectList(null)).thenReturn(List.of(dashboard, website));
+
+        Map<String, Object> result = service.searchProjects("dashboard", 1, 10);
+
+        assertThat(result).containsEntry("total", 1).containsEntry("page", 1).containsEntry("size", 10);
+        List<Map<String, Object>> records = (List<Map<String, Object>>) result.get("records");
+        assertThat(records).hasSize(1);
+        assertThat(records.get(0)).containsEntry("id", "p1");
     }
 
     @Test
@@ -239,6 +263,53 @@ class VtjDesignerServiceTest {
         assertThat(nodes.get(0)).containsEntry("name", "main");
         assertThat((Map<String, Object>) nodes.get(0).get("props")).containsEntry("class", "site-home");
         assertThat(nodeContainsText(nodes, "Acme Cloud")).isTrue();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void parseVuePreservesReactiveStateAndMethodsForInteractivePages() {
+        String source = """
+                <template>
+                  <button @click="increment">{{ state.count }}</button>
+                </template>
+                <script>
+                import { defineComponent, reactive } from 'vue';
+                export default defineComponent({
+                  name: 'Counter',
+                  setup() {
+                    const state = reactive({ count: 0, label: 'Clicks' });
+                    return { state };
+                  },
+                  methods: {
+                    increment() { this.state.count++; }
+                  },
+                  computed: {
+                    summary() { return this.state.label + this.state.count; }
+                  }
+                });
+                </script>
+                <style scoped>.counter { color: red; }</style>
+                """;
+
+        Map<String, Object> dsl = service.parseVue(Map.of("id", "counter", "source", source));
+
+        Map<String, Object> state = (Map<String, Object>) dsl.get("state");
+        Map<String, Object> methods = (Map<String, Object>) dsl.get("methods");
+        Map<String, Object> computed = (Map<String, Object>) dsl.get("computed");
+        assertThat(state).containsKeys("count", "label");
+        assertThat(methods).containsKey("increment");
+        assertThat(methods.get("increment")).asString().contains("this.state.count++");
+        assertThat(computed).containsKey("summary");
+        List<Map<String, Object>> nodes = (List<Map<String, Object>>) dsl.get("nodes");
+        assertThat(nodes.get(0).get("children")).asString().contains("JSExpression").contains("state.count");
+
+        String regenerated = service.genVueContent(Map.of("dsl", dsl));
+        assertThat(regenerated)
+                .contains("const state = reactive")
+                .contains("increment()")
+                .contains("summary()")
+                .contains("{{ state.count }}")
+                .contains("this.state.count++");
     }
 
     @Test

@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -83,6 +84,9 @@ public class AiAgentService {
         chatInput.put("topicId", entity.getId());
         chatInput.put("prompt", userPrompt);
         chatInput.put("source", Jsons.text(data, "source", ""));
+        if (data.containsKey("selection")) {
+            chatInput.put("selection", data.get("selection"));
+        }
         chatInput.put("skipTopicRefresh", true);
         Map<String, Object> chat = createChatPayload(chatInput);
         return Map.of("topic", topic, "chat", chat);
@@ -105,6 +109,9 @@ public class AiAgentService {
         chat.put("topicId", topicId);
         chat.put("prompt", prompt);
         chat.put("source", Jsons.text(data, "source", ""));
+        if (data.containsKey("selection")) {
+            chat.put("selection", data.get("selection"));
+        }
         chat.put("content", "");
         chat.put("createdAt", now);
         chat.put("dsl", null);
@@ -275,6 +282,8 @@ public class AiAgentService {
     String composeAgentPrompt(Map<String, Object> data, String userPrompt, String previousContext) {
         Map<String, Object> body = data == null ? Map.of() : data;
         int max = Math.max(4000, properties.getAi().getMaxContextChars());
+        String selectionContext = jsonContext(body.get("selection"));
+        boolean selectedComponentMode = !selectionContext.isBlank() && !"null".equals(selectionContext);
         StringBuilder prompt = new StringBuilder();
         prompt.append("""
                 # VTJ.PRO Agent Task
@@ -291,6 +300,31 @@ public class AiAgentService {
                 - To update the current page, output `A:` followed by one `diff` block.
                 - To finish, output `F:`.
                 - One response must contain at most one executable `A:` block.
+                - Generated Vue must use `export default defineComponent({ ... })`; put reactive data in
+                  `setup()` as `const state = reactive({ ... })`, and behavior in `methods`/`computed`.
+                  Do not use `<script setup>` for executable page logic because VTJ DSL stores these
+                  capabilities explicitly.
+
+                ## Capability routing
+                Select the smallest executable action that matches the task:
+                - Page files and navigation: `getPages`, `getMenus`, `createPage`, `updatePage`,
+                  `movePage`, `removePage`, `active`, `setHomepage`.
+                - Reusable components/blocks: `getBlocks`, `createBlock`, `updateBlock`,
+                  `removeBlock`, then activate the block and generate its Vue/DSL content.
+                - Current page design and component changes: use a full `vue` block for an empty or
+                  replaced page; use a `diff` block for a focused update to existing Vue source.
+                - API and data behavior: `getApis`, `setApi`, `removeApi`, `removeApis`; consume APIs
+                  from page state, methods, dataSources, events, and JS expressions.
+                - JavaScript and application behavior: write complete Vue 3 script logic, methods,
+                  computed values, watchers, event handlers, JSFunction/JSExpression values, or use
+                  `setGlobalStore`, `setGlobalAxios`, request/response interceptors, route guards,
+                  environment, i18n, access, and global CSS tools.
+                - Runtime verification: after applying generated code, call `refresh`; when context is
+                  missing, call `getCurrentFile`, `getCurrentFileContent`, `getNodeSelected`, or
+                  `getSkills` before modifying anything.
+
+                Tool calls use positional parameters exactly as declared by the registered tool
+                signatures. Never invent a tool name or wrap parameters in an undeclared object.
 
                 ## Staged page generation
                 For page-building tasks such as landing pages, dashboards, official websites, or templates:
@@ -305,20 +339,52 @@ public class AiAgentService {
                 ## User task
                 """).append(blankTo(userPrompt, "No concrete task provided.")).append("\n\n");
 
-        appendSection(prompt, "Previous objective and stage context", truncate(previousContext, 1800));
-        appendSection(prompt, "Platform options", Jsons.text(body, "options", ""));
-        appendSection(prompt, "Current page DSL", Jsons.text(body, "dsl", ""));
-        appendSection(prompt, "Current project DSL", Jsons.text(body, "project", ""));
-        appendSection(prompt, "Current Vue source", Jsons.text(body, "source", ""));
-        appendSection(prompt, "Registered frontend tools JSON", Jsons.text(body, "tools", ""));
-        appendSection(prompt, "Custom LLM config", Jsons.text(body, "llm", ""));
+        if (selectedComponentMode) {
+            prompt.append("""
+                    ## Immutable selected-component scope
+                    A component selection is attached to this request. It is the only mutable scope.
+                    - Return `A:` followed by one complete `vtj-node` JSON code block containing NodeSchema.
+                    - Preserve the selected root node's `name` and `from`; the frontend preserves its `id`.
+                    - You may change only that node's props, events, directives, children, visibility, and lock state.
+                    - Keep all unchanged fields and descendants in the returned NodeSchema.
+                    - Never return page-level `vue`/`diff`, never change ancestors or siblings, and never call
+                      page/global mutation tools while this selection is present.
+                    - JSExpression is `{\"type\":\"JSExpression\",\"value\":\"expression\"}`.
+                    - JSFunction is `{\"type\":\"JSFunction\",\"value\":\"function (...) { ... }\"}`.
 
-        String content = prompt.toString();
-        if (content.length() <= max) {
-            return content;
+                    """);
         }
-        return content.substring(0, max)
-                + "\n\n[Context truncated. Prefer getSkills/getCurrentFileContent/getApis tools for missing details.]";
+
+        int remaining = Math.max(0, max - prompt.length() - 160);
+        int toolsBudget = share(remaining, 25);
+        int sourceBudget = share(remaining, 20);
+        int selectionBudget = share(remaining, 22);
+        int dslBudget = share(remaining, 12);
+        int projectBudget = share(remaining, 8);
+        int previousBudget = share(remaining, 7);
+        int auxiliaryBudget = Math.max(0,
+                remaining - toolsBudget - sourceBudget - selectionBudget - dslBudget - projectBudget - previousBudget);
+
+        appendSection(prompt, "Registered frontend tool signatures",
+                compactToolCatalog(Jsons.text(body, "tools", ""), toolsBudget));
+        appendSection(prompt, "Current Vue source", truncate(Jsons.text(body, "source", ""), sourceBudget));
+        appendSection(prompt, "Selected component scope", truncate(selectionContext, selectionBudget));
+        appendSection(prompt, "Current page DSL", truncate(Jsons.text(body, "dsl", ""), dslBudget));
+        appendSection(prompt, "Current project DSL", truncate(Jsons.text(body, "project", ""), projectBudget));
+        appendSection(prompt, "Previous objective and stage context", truncate(previousContext, previousBudget));
+        appendSection(prompt, "Platform options",
+                truncate(Jsons.text(body, "options", ""), auxiliaryBudget / 2));
+        appendSection(prompt, "Custom LLM config",
+                truncate(Jsons.text(body, "llm", ""), auxiliaryBudget - auxiliaryBudget / 2));
+
+        if (prompt.length() > max) {
+            return prompt.substring(0, max);
+        }
+        if (remainingContextWasTruncated(body, previousContext, toolsBudget, sourceBudget, selectionBudget, dslBudget,
+                projectBudget, previousBudget, auxiliaryBudget)) {
+            prompt.append("[Some context was compacted. Use read tools before changing omitted details.]\n");
+        }
+        return prompt.length() <= max ? prompt.toString() : prompt.substring(0, max);
     }
 
     private String agentSystemPrompt() {
@@ -336,6 +402,73 @@ public class AiAgentService {
         }
         prompt.append("## ").append(title).append('\n')
                 .append(content).append("\n\n");
+    }
+
+    private int share(int total, int percentage) {
+        return Math.max(0, total * percentage / 100);
+    }
+
+    private String compactToolCatalog(String toolsJson, int maxChars) {
+        if (toolsJson == null || toolsJson.isBlank() || maxChars <= 0) {
+            return "";
+        }
+        if (toolsJson.length() <= maxChars) {
+            return toolsJson;
+        }
+        try {
+            List<?> tools = Jsons.MAPPER.readValue(toolsJson, List.class);
+            List<String> signatures = new ArrayList<>();
+            for (Object value : tools) {
+                if (!(value instanceof Map<?, ?> tool)) {
+                    continue;
+                }
+                Object nameValue = tool.get("name");
+                String name = nameValue == null ? "" : String.valueOf(nameValue);
+                if (name.isBlank()) {
+                    continue;
+                }
+                List<String> parameters = new ArrayList<>();
+                Object parameterValue = tool.get("parameters");
+                if (parameterValue instanceof List<?> items) {
+                    for (Object item : items) {
+                        if (item instanceof Map<?, ?> parameter) {
+                            Object parameterNameValue = parameter.get("name");
+                            Object typeValue = parameter.get("type");
+                            String parameterName = parameterNameValue == null ? "arg" : String.valueOf(parameterNameValue);
+                            String type = typeValue == null ? "any" : String.valueOf(typeValue);
+                            boolean required = Boolean.TRUE.equals(parameter.get("required"));
+                            parameters.add(parameterName + ":" + type + (required ? "" : "?"));
+                        }
+                    }
+                }
+                signatures.add("- " + name + "(" + String.join(", ", parameters) + ")");
+            }
+            return truncate(String.join("\n", signatures), maxChars);
+        } catch (Exception ignored) {
+            return truncate(toolsJson, maxChars);
+        }
+    }
+
+    private boolean remainingContextWasTruncated(Map<String, Object> body, String previousContext,
+            int toolsBudget, int sourceBudget, int selectionBudget, int dslBudget, int projectBudget,
+            int previousBudget,
+            int auxiliaryBudget) {
+        return exceeds(Jsons.text(body, "tools", ""), toolsBudget)
+                || exceeds(Jsons.text(body, "source", ""), sourceBudget)
+                || exceeds(jsonContext(body.get("selection")), selectionBudget)
+                || exceeds(Jsons.text(body, "dsl", ""), dslBudget)
+                || exceeds(Jsons.text(body, "project", ""), projectBudget)
+                || exceeds(previousContext, previousBudget)
+                || exceeds(Jsons.text(body, "options", ""), auxiliaryBudget / 2)
+                || exceeds(Jsons.text(body, "llm", ""), auxiliaryBudget - auxiliaryBudget / 2);
+    }
+
+    private String jsonContext(Object value) {
+        return value == null ? "" : Jsons.stringify(value);
+    }
+
+    private boolean exceeds(String value, int maxChars) {
+        return value != null && value.length() > Math.max(0, maxChars);
     }
 
     private String blankTo(String value, String fallback) {
