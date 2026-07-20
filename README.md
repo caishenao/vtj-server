@@ -4,8 +4,8 @@
 
 本文档说明如何把本仓库和 VTJ.PRO 前端源码放在一起本地运行。下面示例假设：
 
-- 后端仓库：`D:\work\self\vtj-server`
-- 前端源码仓库：`D:\work\self\vtj`
+- 已分别克隆本后端仓库和 VTJ.PRO 前端源码仓库。
+- 命令在对应仓库根目录中执行；文中的路径均为仓库内相对路径。
 - 后端端口：`9527`
 - 前端 Vite 端口：`5173`
 
@@ -81,7 +81,7 @@ vtj-server (Spring Boot, http://localhost:9527)
 3. 编译、测试并启动后端。
 
    ```powershell
-   cd D:\work\self\vtj-server
+   # 在后端仓库根目录执行
    mvn -s maven-settings.xml clean compile
    mvn -s maven-settings.xml test
    mvn -s maven-settings.xml spring-boot:run
@@ -132,7 +132,7 @@ Invoke-RestMethod -Uri "http://localhost:9527/api/llm" -Method Get
 
 ### 本地设计器入口
 
-编辑 `D:\work\self\vtj\dev\proxy.config.ts`：
+编辑前端源码仓库中的 `dev/proxy.config.ts`：
 
 ```ts
 export default {
@@ -151,7 +151,7 @@ export default {
 
 ### VTJ.PRO 平台入口
 
-编辑 `D:\work\self\vtj\platforms\pro\proxy.config.ts`，使用同样配置：
+编辑前端源码仓库中的 `platforms/pro/proxy.config.ts`，使用同样配置：
 
 ```ts
 export default {
@@ -178,7 +178,7 @@ export default {
 首次安装依赖：
 
 ```powershell
-cd D:\work\self\vtj
+# 在前端源码仓库根目录执行
 pnpm run setup
 ```
 
@@ -242,7 +242,7 @@ pnpm run pro:dev
 后端打包：
 
 ```powershell
-cd D:\work\self\vtj-server
+# 在后端仓库根目录执行
 mvn -s maven-settings.xml clean package
 ```
 
